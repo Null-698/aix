@@ -140,7 +140,7 @@ impl Source for AsuraScans {
 			manga.description = html
 				.select_first("div#description-text")
 				.and_then(|el| el.text());
-			manga.url = Some(resolved_url);
+			manga.url = Some(resolved_url.clone());
 			manga.tags = html
 				.select("a[href^=/browse?genres=]")
 				.map(|els| els.filter_map(|el| el.text()).collect());
