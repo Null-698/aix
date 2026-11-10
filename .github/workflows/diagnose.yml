@@ -52,4 +52,19 @@ jobs:
                       print('astro islands', len(re.findall(r'<astro-island',raw)))
               except Exception as e:
                   print('ERROR', name, repr(e))
+          for api_url in [
+              'https://api.asurascans.com/api/series/swordmasters-youngest-son',
+              'https://api.asurascans.com/api/series/swordmasters-youngest-son/chapters',
+              'https://api.asurascans.com/api/series/swordmasters-youngest-son/chapters/1',
+              'https://asurascans.com/api/series/swordmasters-youngest-son/chapters',
+          ]:
+              try:
+                  req = urllib.request.Request(api_url,headers={'User-Agent':'Mozilla/5.0','Accept':'application/json'})
+                  with urllib.request.urlopen(req,timeout=15) as r:
+                      raw=r.read(400).decode('utf-8','replace')
+                      print('API',api_url,r.status,r.headers.get('content-type'),repr(raw[:250]))
+              except urllib.error.HTTPError as e:
+                  print('API',api_url,'HTTP',e.code,'server',e.headers.get('server'),'content-type',e.headers.get('content-type'),'body',repr(e.read(300).decode('utf-8','replace')))
+              except Exception as e:
+                  print('API',api_url,'ERROR',repr(e))
           PY
