@@ -17,6 +17,7 @@ use aidoku::{
 mod auth;
 mod helpers;
 mod models;
+mod site;
 
 use models::*;
 
@@ -116,7 +117,7 @@ impl Source for AsuraScans {
 			.filter(|url| url.starts_with(BASE_URL))
 			.map(Into::into)
 			.unwrap_or_else(|| helpers::get_manga_url(&manga.key));
-		let html = Request::get(&url)?.html()?;
+		let (html, resolved_url) = site::get_html(&url)?;
 
 		if needs_details {
 			manga.title = html
@@ -139,7 +140,7 @@ impl Source for AsuraScans {
 			manga.description = html
 				.select_first("div#description-text")
 				.and_then(|el| el.text());
-			manga.url = Some(url);
+			manga.url = Some(resolved_url);
 			manga.tags = html
 				.select("a[href^=/browse?genres=]")
 				.map(|els| els.filter_map(|el| el.text()).collect());
@@ -248,115 +249,83 @@ impl Source for AsuraScans {
 	}
 
 	fn get_page_list(&self, manga: Manga, chapter: Chapter) -> Result<Vec<Page>> {
-		// Public chapters expose page images directly in server-rendered HTML.
-		// Keep the API/legacy island parser as a fallback (including for paid chapters).
-		if !chapter.locked {
-			let url = chapter.url.clone().filter(|url| url.starts_with(BASE_URL))
-				.unwrap_or_else(|| helpers::get_chapter_url(&chapter.key, &manga.key));
-			if let Ok(mut req) = Request::get(url) {
-				if let Ok(status) = auth::get_login_status() {
-					req.set_header("Authorization", &format!("Bearer {}", status.access_token));
-					req.set_header("Cookie", &format!(
-						"access_token={}; refresh_token={}",
-						status.access_token, status.refresh_token
-					));
-				}
-				if let Ok(html) = req.html() {
-					if let Some(images) = html.select(
-						"img[alt^='Page '], img[src*='/asura-images/chapters/'], img[data-src*='/asura-images/chapters/']"
-					) {
-						let pages: Vec<Page> = images.filter_map(|img| {
-							let url = img.attr("abs:data-src")
-								.or_else(|| img.attr("abs:src"))
-								.or_else(|| img.attr("data-src"))
-								.or_else(|| img.attr("src"))?;
-							if !url.starts_with("https://") && !url.starts_with("http://") {
-								return None;
-							}
-							Some(Page {
-								content: PageContent::url(url),
-								..Default::default()
-							})
-						}).collect();
-						if !pages.is_empty() {
-							return Ok(pages);
-						}
+		let chapter_url = chapter.url.as_deref()
+			.filter(|url| url.starts_with(BASE_URL))
+			.map(Into::into)
+			.unwrap_or_else(|| helpers::get_chapter_url(&chapter.key, &manga.key));
+
+		// The site serves page URLs in the browser-rendered chapter HTML.
+		let (html, _) = site::get_html(&chapter_url)?;
+		let pages: Vec<Page> = html
+			.select("img[alt^='Page '], img[src*='/asura-images/chapters/'], img[data-src*='/asura-images/chapters/']")
+			.map(|images| {
+				images.filter_map(|img| {
+					let url = img.attr("abs:data-src")
+						.or_else(|| img.attr("abs:src"))
+						.or_else(|| img.attr("data-src"))
+						.or_else(|| img.attr("src"))?;
+					if !url.starts_with("https://") && !url.starts_with("http://") {
+						return None;
 					}
-				}
-			}
-		}
-		let api_url = format!("{API_URL}/series/{}/chapters/{}", manga.key, chapter.key);
-		let mut api_req = Request::get(api_url)?;
-		if let Ok(status) = auth::get_login_status() {
-			api_req.set_header("Authorization", &format!("Bearer {}", status.access_token));
-			api_req.set_header(
-				"Cookie",
-				&format!(
-					"access_token={}; refresh_token={}",
-					status.access_token, status.refresh_token
-				),
-			);
-		}
-		if let Ok(json) = api_req.json_owned::<serde_json::Value>()
-			&& let Some(page_arr) = json["data"]["chapter"]["pages"].as_array()
-		{
-			let pages: Vec<Page> = page_arr
-				.iter()
-				.filter_map(|obj| {
-					let url = obj
-						.as_str()
-						.or_else(|| obj["url"].as_str())
-						.or_else(|| obj["url"][1].as_str())?;
 					Some(Page {
 						content: PageContent::url(url),
 						..Default::default()
 					})
-				})
-				.collect();
-			if !pages.is_empty() {
-				return Ok(pages);
-			}
+				}).collect()
+			})
+			.unwrap_or_default();
+		if !pages.is_empty() {
+			return Ok(pages);
 		}
 
-		let url = chapter.url.clone().filter(|url| url.starts_with(BASE_URL))
-				.unwrap_or_else(|| helpers::get_chapter_url(&chapter.key, &manga.key));
-		let mut req = Request::get(url)?;
+		// Premium chapters may still need the authenticated API.
+		let api_url = format!("{API_URL}/series/{}/chapters/{}", manga.key, chapter.key);
+		let mut api_req = Request::get(api_url)?;
 		if let Ok(status) = auth::get_login_status() {
-			req.set_header("Authorization", &format!("Bearer {}", status.access_token));
-			req.set_header(
-				"Cookie",
-				&format!(
-					"access_token={}; refresh_token={}",
-					status.access_token, status.refresh_token
-				),
-			);
+			api_req.set_header("Authorization", &format!("Bearer {}", status.access_token));
+			api_req.set_header("Cookie", &format!(
+				"access_token={}; refresh_token={}",
+				status.access_token, status.refresh_token
+			));
 		}
-		let html = req.html()?;
-
-		let island_props = html
-			.select_first(
-				"astro-island[component-url*=ChapterReader], astro-island[opts*=ChapterReader]",
-			)
-			.and_then(|el| el.attr("props"))
-			.ok_or_else(|| error!("Missing astro-island"))?;
-
-		let json = serde_json::from_str::<serde_json::Value>(&island_props)?;
-
-		let page_arr = json["pages"][1]
-			.as_array()
-			.ok_or_else(|| error!("Missing pages"))?;
-
-		Ok(page_arr
-			.iter()
-			.filter_map(|obj| {
-				let url = obj[1]["url"][1].as_str()?;
+		if let Ok(json) = api_req.json_owned::<serde_json::Value>()
+			&& let Some(page_arr) = json["data"]["chapter"]["pages"].as_array()
+		{
+			let pages: Vec<Page> = page_arr.iter().filter_map(|obj| {
+				let url = obj.as_str()
+					.or_else(|| obj["url"].as_str())
+					.or_else(|| obj["url"][1].as_str())?;
 				Some(Page {
 					content: PageContent::url(url),
 					..Default::default()
 				})
-			})
-			.collect())
+			}).collect();
+			if !pages.is_empty() {
+				return Ok(pages);
+			}
+		}
+		// Older versions of the site used an Astro reader island.
+		if let Some(props) = html.select_first(
+			"astro-island[component-url*=ChapterReader], astro-island[opts*=ChapterReader]"
+		).and_then(|el| el.attr("props")) {
+			if let Ok(json) = serde_json::from_str::<serde_json::Value>(&props) {
+				if let Some(items) = json["pages"][1].as_array() {
+					let pages: Vec<Page> = items.iter().filter_map(|obj| {
+						let url = obj[1]["url"][1].as_str()?;
+						Some(Page {
+							content: PageContent::url(url),
+							..Default::default()
+						})
+					}).collect();
+					if !pages.is_empty() {
+						return Ok(pages);
+					}
+				}
+			}
+		}
+		bail!("AsuraScans returned no readable images for this chapter")
 	}
+
 }
 
 impl Home for AsuraScans {
