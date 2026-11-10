@@ -1,0 +1,58 @@
+name: Build AsuraScans AIX
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'sources/en.asurascans/**'
+      - '.github/workflows/build-asurascans.yml'
+      - '.github/actions/install-aidoku-cli/**'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust and WASM target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.99.0'
+          components: rustfmt
+          targets: wasm32-unknown-unknown
+      - name: Install Aidoku CLI
+        uses: ./.github/actions/install-aidoku-cli
+      - name: Format patched Rust
+        run: cargo fmt --manifest-path sources/en.asurascans/Cargo.toml
+      - name: Package AsuraScans
+        working-directory: sources/en.asurascans
+        run: aidoku package
+      - name: Verify package
+        run: |
+          set -euo pipefail
+          test -s sources/en.asurascans/package.aix
+          aidoku verify sources/en.asurascans/package.aix
+          unzip -t sources/en.asurascans/package.aix
+          mkdir -p dist
+          cp sources/en.asurascans/package.aix dist/en.asurascans-v23.aix
+      - name: Upload AIX build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: en.asurascans-v23
+          path: dist/en.asurascans-v23.aix
+          if-no-files-found: error
+      - name: Publish AIX as GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="asurascans-v23"
+          if gh release view "$tag" > /dev/null 2>&1; then
+            gh release upload "$tag" dist/en.asurascans-v23.aix --clobber
+          else
+            gh release create "$tag" dist/en.asurascans-v23.aix \
+              --target "$GITHUB_SHA" \
+              --title "AsuraScans v23 (Aidoku)" \
+              --notes "Compiled Aidoku extension en.asurascans with live-site chapter list and reader parsing."
+          fi
