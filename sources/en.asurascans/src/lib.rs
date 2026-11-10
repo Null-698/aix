@@ -14,6 +14,7 @@ use aidoku::{
 };
 
 mod auth;
+mod chapter_metadata;
 mod helpers;
 mod models;
 mod site;
@@ -211,9 +212,6 @@ impl Source for AsuraScans {
 								&& (label_lower.contains("early access")
 									|| label_lower.contains("unlocks in")
 									|| link.select_first("svg.lucide-lock").is_some());
-							if skip_locked && locked {
-								return None;
-							}
 							seen.push(key.clone());
 
 							let date_uploaded = helpers::get_chapter_date(&link);
@@ -230,6 +228,38 @@ impl Source for AsuraScans {
 						.collect()
 				})
 				.unwrap_or_default();
+
+			// Prefer structured Astro metadata for access status: the anchor
+			// often hides premium/early-access state in non-text attributes.
+			for entry in chapter_metadata::from_html(&html) {
+				let key = entry.number.to_string();
+				let locked = entry.locked.unwrap_or(false) && !is_subscribed;
+				if let Some(chapter) = chapters.iter_mut().find(|chapter| chapter.key == key) {
+					if entry.locked.is_some() {
+						chapter.locked = locked;
+					}
+					if chapter.date_uploaded.is_none() {
+						chapter.date_uploaded = entry.date_uploaded;
+					}
+					if chapter.title.is_none() {
+						chapter.title = entry.title;
+					}
+				} else {
+					// Some premium chapters are metadata-only for guests.
+					chapters.push(Chapter {
+						key: key.clone(),
+						chapter_number: Some(entry.number),
+						date_uploaded: entry.date_uploaded,
+						title: entry.title,
+						url: Some(format!("{}/chapter/{key}", resolved_url.trim_end_matches('/'))),
+						locked,
+						..Default::default()
+					});
+				}
+			}
+			if skip_locked {
+				chapters.retain(|chapter| !chapter.locked);
+			}
 
 			// Follow Aidoku's source convention: latest chapter first. This also
 			// protects the order when the website adds shortcuts or changes markup.

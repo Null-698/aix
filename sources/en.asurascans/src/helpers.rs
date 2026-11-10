@@ -55,7 +55,7 @@ pub fn get_chapter_url(chapter_id: &str, manga_id: &str) -> String {
 
 /// Parse chapter dates shown by AsuraScans, including relative labels such as
 /// "3 days ago" and "last week". Aidoku expects a Unix timestamp (seconds).
-fn parse_chapter_date_text(text: &str) -> Option<i64> {
+pub fn parse_chapter_date_text(text: &str) -> Option<i64> {
 	let text = text.trim();
 	if text.is_empty() {
 		return None;
