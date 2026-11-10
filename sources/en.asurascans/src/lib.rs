@@ -182,63 +182,85 @@ impl Source for AsuraScans {
 		}
 
 		if needs_chapters {
-			// Extract chapters from links rendered on the actual series page.
-			// Do not depend on Astro component names or inner text formatting.
+			// Chapter links are server-rendered on the series page. Unlike the
+			// "First Chapter" shortcut, the chapter list entries start with "Chapter".
 			let skip_locked = !defaults_get::<bool>("showLocked").unwrap_or(true);
 			let is_subscribed = auth::is_subscribed();
 			let mut seen = Vec::<String>::new();
-			let chapters: Vec<Chapter> = html.select("a").map(|links| {
-				links.filter_map(|link| {
-					let href = link.attr("abs:href").or_else(|| link.attr("href"))?;
-					if !href.contains("/chapter/") {
-						return None;
-					}
-					let key = helpers::get_chapter_key(&href)?;
-					let number = key.parse::<f32>().ok()?;
-					if seen.contains(&key) {
-						return None;
-					}
 
-					let label = link.text().unwrap_or_default().to_ascii_lowercase();
-					let locked = !is_subscribed && (
-						label.contains("early access")
-						|| label.contains("unlocks in")
-						|| link.select_first("svg.lucide-lock").is_some()
-					);
-					if skip_locked && locked {
-						return None;
-					}
-					seen.push(key.clone());
+			let mut chapters: Vec<Chapter> = html
+				.select("a[href*='/chapter/']")
+				.map(|links| {
+					links
+						.filter_map(|link| {
+							let label = link.text()?;
+							// Exclude "First Chapter", "Start Reading", and navigation
+							// shortcuts, not the actual chapter list rows.
+							if !label.trim_start().starts_with("Chapter") {
+								return None;
+							}
 
-					let date = link.select_first("time")
-						.and_then(|e| e.attr("datetime").or_else(|| e.text()))
-						.or_else(|| link.select_first("span.text-sm").and_then(|e| e.text()));
-					let date_uploaded = date.and_then(|s| {
-						["MMM d, yyyy", "MMM dd, yyyy", "yyyy-MM-dd"]
-							.iter()
-							.find_map(|f| parse_date(&s, f))
-					});
+							let href = link.attr("abs:href").or_else(|| link.attr("href"))?;
+							let key = helpers::get_chapter_key(&href)?;
+							let chapter_number = key.parse::<f32>().ok()?;
+							if seen.contains(&key) {
+								return None;
+							}
 
-					Some(Chapter {
-						key,
-						chapter_number: Some(number),
-						date_uploaded,
-						url: Some(href),
-						locked,
-						..Default::default()
-					})
-				}).collect()
-			}).unwrap_or_default();
+							let label_lower = label.to_ascii_lowercase();
+							let locked = !is_subscribed
+								&& (label_lower.contains("early access")
+									|| label_lower.contains("unlocks in")
+									|| link.select_first("svg.lucide-lock").is_some());
+							if skip_locked && locked {
+								return None;
+							}
+							seen.push(key.clone());
 
-			// A challenge page or an unexpected website layout must not masquerade
-			// as a genuine series with zero chapters.
+							let date = link
+								.select_first("time")
+								.and_then(|el| el.attr("datetime").or_else(|| el.text()))
+								.or_else(|| {
+									link.select_first("span.text-white\\/40, span.text-sm")
+										.and_then(|el| el.text())
+								});
+							let date_uploaded = date.and_then(|date| {
+								["MMM dd, yyyy", "MMM d, yyyy", "yyyy-MM-dd"]
+									.iter()
+									.find_map(|format| parse_date(&date, format))
+							});
+
+							Some(Chapter {
+								key,
+								chapter_number: Some(chapter_number),
+								date_uploaded,
+								url: Some(href),
+								locked,
+								..Default::default()
+							})
+						})
+						.collect()
+				})
+				.unwrap_or_default();
+
+			// Follow Aidoku's source convention: latest chapter first. This also
+			// protects the order when the website adds shortcuts or changes markup.
+			chapters.sort_by(|a, b| {
+				b.chapter_number
+					.partial_cmp(&a.chapter_number)
+					.unwrap_or(core::cmp::Ordering::Equal)
+			});
+
 			if chapters.is_empty() {
-				let page_title = html.select_first("title").and_then(|el| el.text())
-					.unwrap_or_default().to_ascii_lowercase();
+				let page_title = html
+					.select_first("title")
+					.and_then(|el| el.text())
+					.unwrap_or_default()
+					.to_ascii_lowercase();
 				if page_title.contains("just a moment")
 					|| page_title.contains("attention required")
 				{
-					bail!("Cloudflare blocked AsuraScans. Verify the site in Aidoku's browser and refresh.");
+					bail!("AsuraScans returned a Cloudflare challenge");
 				}
 				bail!("No chapter links in AsuraScans HTML. Website access or parsing failed.");
 			}
