@@ -9,7 +9,6 @@ use aidoku::{
 	imports::{
 		defaults::defaults_get,
 		net::{Request, TimeUnit, set_rate_limit},
-		std::parse_date,
 	},
 	prelude::*,
 };
@@ -217,18 +216,7 @@ impl Source for AsuraScans {
 							}
 							seen.push(key.clone());
 
-							let date = link
-								.select_first("time")
-								.and_then(|el| el.attr("datetime").or_else(|| el.text()))
-								.or_else(|| {
-									link.select_first("span.text-white\\/40, span.text-sm")
-										.and_then(|el| el.text())
-								});
-							let date_uploaded = date.and_then(|date| {
-								["MMM dd, yyyy", "MMM d, yyyy", "yyyy-MM-dd"]
-									.iter()
-									.find_map(|format| parse_date(&date, format))
-							});
+							let date_uploaded = helpers::get_chapter_date(&link);
 
 							Some(Chapter {
 								key,

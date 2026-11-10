@@ -35,24 +35,24 @@ jobs:
           aidoku verify sources/en.asurascans/package.aix
           unzip -t sources/en.asurascans/package.aix
           mkdir -p dist
-          cp sources/en.asurascans/package.aix dist/en.asurascans-v26.aix
+          cp sources/en.asurascans/package.aix dist/en.asurascans-v27.aix
       - name: Upload AIX build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: en.asurascans-v26
-          path: dist/en.asurascans-v26.aix
+          name: en.asurascans-v27
+          path: dist/en.asurascans-v27.aix
           if-no-files-found: error
       - name: Publish AIX as GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag="asurascans-v26"
+          tag="asurascans-v27"
           if gh release view "$tag" > /dev/null 2>&1; then
-            gh release upload "$tag" dist/en.asurascans-v26.aix --clobber
+            gh release upload "$tag" dist/en.asurascans-v27.aix --clobber
           else
-            gh release create "$tag" dist/en.asurascans-v26.aix \
+            gh release create "$tag" dist/en.asurascans-v27.aix \
               --target "$GITHUB_SHA" \
-              --title "AsuraScans v26 (Aidoku)" \
+              --title "AsuraScans v27 (Aidoku)" \
               --notes "Compiled Aidoku extension en.asurascans with live-site chapter list and reader parsing."
           fi
