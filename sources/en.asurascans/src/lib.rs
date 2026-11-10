@@ -112,7 +112,10 @@ impl Source for AsuraScans {
 		needs_details: bool,
 		needs_chapters: bool,
 	) -> Result<Manga> {
-		let url = helpers::get_manga_url(&manga.key);
+		let url = manga.url.as_deref()
+			.filter(|url| url.starts_with(BASE_URL))
+			.map(Into::into)
+			.unwrap_or_else(|| helpers::get_manga_url(&manga.key));
 		let html = Request::get(&url)?.html()?;
 
 		if needs_details {
@@ -178,55 +181,66 @@ impl Source for AsuraScans {
 		}
 
 		if needs_chapters {
-			// The live site now serves chapter anchors directly in its HTML.
+			// Extract chapters from links rendered on the actual series page.
+			// Do not depend on Astro component names or inner text formatting.
 			let skip_locked = !defaults_get::<bool>("showLocked").unwrap_or(true);
 			let is_subscribed = auth::is_subscribed();
 			let mut seen = Vec::<String>::new();
-			let chapters = html
-				.select("a[href*='/chapter/']")
-				.map(|links| {
-					links
-						.filter_map(|link| {
-							let label = link.text()?;
-							let label_lower = label.to_ascii_lowercase();
-							if !label_lower.contains("chapter") {
-								return None;
-							}
-							let href = link.attr("abs:href")?;
-							let key = helpers::get_chapter_key(&href)?;
-							let number = key.parse::<f32>().ok()?;
-							if seen.contains(&key) {
-								return None;
-							}
-							seen.push(key.clone());
-							let locked = !is_subscribed && (
-								label_lower.contains("early access")
-								|| label_lower.contains("unlocks in")
-								|| link.select_first("svg.lucide-lock").is_some()
-							);
-							if skip_locked && locked {
-								return None;
-							}
-							let date = link.select_first("time")
-								.and_then(|e| e.attr("datetime").or_else(|| e.text()))
-								.or_else(|| link.select_first("span.text-sm").and_then(|e| e.text()));
-							let date_uploaded = date.and_then(|s| {
-								["MMM d, yyyy", "MMM dd, yyyy", "yyyy-MM-dd"]
-									.iter()
-									.find_map(|f| parse_date(&s, f))
-							});
-							Some(Chapter {
-								url: Some(helpers::get_chapter_url(&key, &manga.key)),
-								key,
-								chapter_number: Some(number),
-								date_uploaded,
-								locked,
-								..Default::default()
-							})
-						})
-						.collect()
-				})
-				.unwrap_or_default();
+			let chapters: Vec<Chapter> = html.select("a").map(|links| {
+				links.filter_map(|link| {
+					let href = link.attr("abs:href").or_else(|| link.attr("href"))?;
+					if !href.contains("/chapter/") {
+						return None;
+					}
+					let key = helpers::get_chapter_key(&href)?;
+					let number = key.parse::<f32>().ok()?;
+					if seen.contains(&key) {
+						return None;
+					}
+
+					let label = link.text().unwrap_or_default().to_ascii_lowercase();
+					let locked = !is_subscribed && (
+						label.contains("early access")
+						|| label.contains("unlocks in")
+						|| link.select_first("svg.lucide-lock").is_some()
+					);
+					if skip_locked && locked {
+						return None;
+					}
+					seen.push(key.clone());
+
+					let date = link.select_first("time")
+						.and_then(|e| e.attr("datetime").or_else(|| e.text()))
+						.or_else(|| link.select_first("span.text-sm").and_then(|e| e.text()));
+					let date_uploaded = date.and_then(|s| {
+						["MMM d, yyyy", "MMM dd, yyyy", "yyyy-MM-dd"]
+							.iter()
+							.find_map(|f| parse_date(&s, f))
+					});
+
+					Some(Chapter {
+						key,
+						chapter_number: Some(number),
+						date_uploaded,
+						url: Some(href),
+						locked,
+						..Default::default()
+					})
+				}).collect()
+			}).unwrap_or_default();
+
+			// A challenge page or an unexpected website layout must not masquerade
+			// as a genuine series with zero chapters.
+			if chapters.is_empty() {
+				let page_title = html.select_first("title").and_then(|el| el.text())
+					.unwrap_or_default().to_ascii_lowercase();
+				if page_title.contains("just a moment")
+					|| page_title.contains("attention required")
+				{
+					bail!("Cloudflare blocked AsuraScans. Verify the site in Aidoku's browser and refresh.");
+				}
+				bail!("No chapter links in AsuraScans HTML. Website access or parsing failed.");
+			}
 			manga.chapters = Some(chapters);
 		}
 
@@ -237,7 +251,8 @@ impl Source for AsuraScans {
 		// Public chapters expose page images directly in server-rendered HTML.
 		// Keep the API/legacy island parser as a fallback (including for paid chapters).
 		if !chapter.locked {
-			let url = helpers::get_chapter_url(&chapter.key, &manga.key);
+			let url = chapter.url.clone().filter(|url| url.starts_with(BASE_URL))
+				.unwrap_or_else(|| helpers::get_chapter_url(&chapter.key, &manga.key));
 			if let Ok(mut req) = Request::get(url) {
 				if let Ok(status) = auth::get_login_status() {
 					req.set_header("Authorization", &format!("Bearer {}", status.access_token));
@@ -303,7 +318,8 @@ impl Source for AsuraScans {
 			}
 		}
 
-		let url = helpers::get_chapter_url(&chapter.key, &manga.key);
+		let url = chapter.url.clone().filter(|url| url.starts_with(BASE_URL))
+				.unwrap_or_else(|| helpers::get_chapter_url(&chapter.key, &manga.key));
 		let mut req = Request::get(url)?;
 		if let Ok(status) = auth::get_login_status() {
 			req.set_header("Authorization", &format!("Bearer {}", status.access_token));
