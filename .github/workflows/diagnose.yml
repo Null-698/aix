@@ -1,0 +1,55 @@
+name: Diagnose live AsuraScans HTML
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/diagnose.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inspect live HTML and chapter anchors
+        run: |
+          python3 - <<'PY'
+          import urllib.request, urllib.error, re
+          from html.parser import HTMLParser
+          class Anchors(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.links = []
+                  self.current = None
+              def handle_starttag(self, tag, attrs):
+                  if tag == 'a':
+                      d = dict(attrs)
+                      self.current = [d.get('href', ''), '']
+              def handle_data(self, data):
+                  if self.current:
+                      self.current[1] += data
+              def handle_endtag(self, tag):
+                  if tag == 'a' and self.current:
+                      self.links.append(self.current)
+                      self.current = None
+          for name, url in [
+              ('canonical', 'https://asurascans.com/comics/swordmasters-youngest-son-f212c582'),
+              ('short', 'https://asurascans.com/comics/swordmasters-youngest-son'),
+              ('cyberpunk', 'https://asurascans.com/comics/cyberpunk-chivalry-f212c582'),
+          ]:
+              try:
+                  req = urllib.request.Request(url, headers={'User-Agent':'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36'})
+                  with urllib.request.urlopen(req, timeout=20) as r:
+                      raw = r.read().decode('utf-8', 'replace')
+                      print('URL', name, r.status, r.geturl(), 'length', len(raw))
+                      print('html title', re.findall(r'<title[^>]*>(.*?)</title>', raw, re.S)[:1])
+                      print('chapter href count', len(re.findall(r'href="[^"]*/chapter/', raw)))
+                      print('cf markers', [s for s in ('cf-chl','Just a moment','Access denied') if s in raw])
+                      parser = Anchors()
+                      parser.feed(raw)
+                      ch = [(u,t[:90].strip()) for u,t in parser.links if '/chapter/' in u]
+                      print('all links', len(parser.links), 'chapters', len(ch),'first',repr(ch[:7]))
+                      print('astro islands', len(re.findall(r'<astro-island',raw)))
+              except Exception as e:
+                  print('ERROR', name, repr(e))
+          PY
