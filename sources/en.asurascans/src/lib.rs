@@ -7,7 +7,7 @@ use aidoku::{
 	alloc::{String, Vec, string::ToString, vec},
 	helpers::uri::QueryParameters,
 	imports::{
-		defaults::defaults_get,
+		defaults::{defaults_get, defaults_set_data},
 		net::{Request, TimeUnit, set_rate_limit},
 	},
 	prelude::*,
@@ -186,6 +186,13 @@ impl Source for AsuraScans {
 			// "First Chapter" shortcut, the chapter list entries start with "Chapter".
 			let skip_locked = !defaults_get::<bool>("showLocked").unwrap_or(true);
 			let is_subscribed = auth::is_subscribed();
+			// Aidoku identifies the current chapter by comparing the full
+			// Chapter record. Relative dates such as "2 days ago" must not
+			// produce a different timestamp every time the manga is refreshed.
+			let date_cache_key = format!("asurascans.chapter_dates.{}", manga.key);
+			let mut date_cache: HashMap<String, i64> =
+				defaults_get(&date_cache_key).unwrap_or_default();
+			let mut published_dates = HashMap::<String, i64>::new();
 			let mut seen = Vec::<String>::new();
 
 			let mut chapters: Vec<Chapter> = html
@@ -234,12 +241,17 @@ impl Source for AsuraScans {
 			for entry in chapter_metadata::from_html(&html) {
 				let key = entry.number.to_string();
 				let locked = entry.locked.unwrap_or(false) && !is_subscribed;
+				if let Some(timestamp) = entry.date_uploaded {
+					published_dates.insert(key.clone(), timestamp);
+				}
 				if let Some(chapter) = chapters.iter_mut().find(|chapter| chapter.key == key) {
 					if entry.locked.is_some() {
 						chapter.locked = locked;
 					}
-					if chapter.date_uploaded.is_none() {
-						chapter.date_uploaded = entry.date_uploaded;
+					if let Some(date_uploaded) = entry.date_uploaded {
+						// Prefer the source's exact published date over a
+						// display-only relative date.
+						chapter.date_uploaded = Some(date_uploaded);
 					}
 					if chapter.title.is_none() {
 						chapter.title = entry.title;
@@ -257,6 +269,19 @@ impl Source for AsuraScans {
 					});
 				}
 			}
+			// Keep a stable upload timestamp for every chapter across refreshes.
+			// Exact dates from the Astro payload take priority, then prior
+			// cached timestamps, then the approximate relative HTML date.
+			for chapter in &mut chapters {
+				let date_uploaded = published_dates.get(&chapter.key).copied()
+					.or_else(|| date_cache.get(&chapter.key).copied())
+					.or(chapter.date_uploaded);
+				chapter.date_uploaded = date_uploaded;
+				if let Some(timestamp) = date_uploaded {
+					date_cache.insert(chapter.key.clone(), timestamp);
+				}
+			}
+			defaults_set_data(&date_cache_key, date_cache);
 			if skip_locked {
 				chapters.retain(|chapter| !chapter.locked);
 			}

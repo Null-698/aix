@@ -50,8 +50,8 @@ fn entry_from_value(value: &Value) -> Option<ChapterMetadata> {
 	if !number.is_finite() {
 		return None;
 	}
-	let date_uploaded = entry.get("created_at")
-		.or_else(|| entry.get("published_at"))
+	let date_uploaded = entry.get("published_at")
+		.or_else(|| entry.get("created_at"))
 		.and_then(Value::as_str)
 		.and_then(helpers::parse_chapter_date_text);
 	let premium = entry.get("is_premium").and_then(Value::as_bool);
