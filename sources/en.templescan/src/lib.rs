@@ -5,7 +5,7 @@ use aidoku::{
 	MangaPageResult, MangaStatus, MangaWithChapter, Page, PageContent, PageContext, Result, Source,
 	Viewer,
 	alloc::{String, Vec, string::ToString, vec},
-	imports::net::Request,
+	imports::{net::Request, html::Html},
 	imports::std::{parse_date, send_partial_result},
 	prelude::*,
 };
@@ -14,6 +14,7 @@ use core::cell::RefCell;
 
 mod rsc;
 mod network;
+mod rendered;
 
 use rsc::*;
 
@@ -212,15 +213,45 @@ fn link_of(key: String, title: String, cover: Option<String>) -> Link {
 fn directory(web: &RefCell<network::BrowserClient>) -> Result<Vec<BrowseSeries>> {
 	let payload = fetch_rsc(web, &format!("{DOMAIN}/comics"))?;
 	let items: Vec<BrowseSeries> = largest_array(&payload, |items: &[BrowseSeries]| {
-		items
-			.first()
-			.map(|first| !first.series_slug.is_empty() && !first.title.is_empty())
+		items.first().map(|first| !first.series_slug.is_empty() && !first.title.is_empty())
 			.unwrap_or(false)
 	});
-	if items.is_empty() {
-		bail!("No series directory found");
+	if !items.is_empty() {
+		return Ok(items);
 	}
-	Ok(items)
+	// Newer TempleToons releases obfuscate the Flight JSON keys. Read the
+	// browser-rendered cards instead of depending on those rotating keys.
+	let doc = Html::parse_with_url(&payload, DOMAIN)?;
+	let mut entries = Vec::<BrowseSeries>::new();
+	if let Some(links) = doc.select("a[href*='/comic/']") {
+		for link in links {
+			let Some(title) = link.select_first("h2").and_then(|element| element.text()) else {
+				continue;
+			};
+			let Some(url) = link.attr("abs:href").or_else(|| link.attr("href")) else {
+				continue;
+			};
+			let Some(slug) = url.split("/comic/").nth(1).and_then(|value| value.split(['/', '?', '#']).next()) else {
+				continue;
+			};
+			if slug.is_empty() || entries.iter().any(|entry| entry.series_slug == slug) {
+				continue;
+			}
+			let thumbnail = link.parent()
+				.and_then(|parent| parent.select_first("img"))
+				.and_then(|image| image.attr("abs:src").or_else(|| image.attr("src")));
+			entries.push(BrowseSeries {
+				series_slug: slug.to_string(),
+				title,
+				thumbnail,
+				..Default::default()
+			});
+		}
+	}
+	if entries.is_empty() {
+		bail!("Temple Scan: no series cards in browser HTML. Site layout may have changed.");
+	}
+	Ok(entries)
 }
 
 fn page_of(items: Vec<BrowseSeries>, page: i32) -> MangaPageResult {
@@ -331,7 +362,9 @@ impl Source for TempleScan {
 		let Some(mut data) = extract_by_key::<SeriesData, _>(&payload, "seriesData", |value| {
 			!value.title.is_empty()
 		}) else {
-			bail!("No details found for {slug}");
+			// The current site uses obfuscated Next.js props. Its visible
+			// page has the stable title and chapter-link elements.
+			return rendered::manga_update(manga, &payload, needs_details, needs_chapters);
 		};
 
 		if needs_details {
@@ -430,17 +463,11 @@ impl Source for TempleScan {
 	}
 
 	fn get_page_list(&self, manga: Manga, chapter: Chapter) -> Result<Vec<Page>> {
-		let payload = fetch_rsc(&self.browser, &format!("{DOMAIN}/comic/{}/{}", manga.key, chapter.key))?;
-		let pages = extract_by_key::<Vec<String>, _>(&payload, "pages", |value| {
-			value.iter().all(|page| !page.is_empty())
-		})
-		.unwrap_or_default();
-		if pages.is_empty() {
-			bail!("No pages found for chapter {}", chapter.key);
-		}
-		Ok(pages
+		let url = format!("{DOMAIN}/comic/{}/{}", manga.key, chapter.key);
+		let urls = self.browser.borrow_mut().get_reader_pages(&url)?;
+		Ok(urls
 			.into_iter()
-			.filter_map(|page| image_url(Some(&page)))
+			.filter_map(|url| image_url(Some(&url)))
 			.map(|url| Page {
 				content: PageContent::url(url),
 				..Default::default()
