@@ -451,183 +451,102 @@ impl Source for TempleScan {
 
 impl Home for TempleScan {
 	fn get_home(&self) -> Result<HomeLayout> {
-		let mut components: Vec<HomeComponent> = Vec::new();
-		let requests = vec![
-			Request::get(format!("{API_URL}/banners"))?.header("Referer", &format!("{DOMAIN}/")),
-			Request::get(format!("{API_URL}/topSeries"))?.header("Referer", &format!("{DOMAIN}/")),
-			Request::get(format!("{DOMAIN}/"))?
-				.header("RSC", "1")
-				.header("Referer", &format!("{DOMAIN}/")),
-		];
-		let mut responses = Request::send_all(requests).into_iter();
-		let banners_response = responses.next();
-		let trending_response = responses.next();
-		let home_response = responses.next();
+		// The previous home ignored three failed requests and returned an empty
+		// layout. Rely on one browser-backed catalogue request instead; errors
+		// are surfaced to Aidoku rather than silently showing a blank page.
+		let catalogue = directory(&self.browser)?;
+		if catalogue.is_empty() {
+			bail!("Temple Scan: empty comics catalogue");
+		}
 
-		if let Some(Ok(response)) = banners_response
-			&& let Ok(banners) = response.get_json_owned::<Vec<FeaturedEntry>>()
-		{
-			let entries: Vec<Manga> = banners
-				.into_iter()
-				.filter_map(|entry| {
-					let cover = image_url(entry.protagonist.as_deref())?;
-					let mut description = entry.description.as_deref().map(strip_html);
-					if let Some(views) = entry.total_views.filter(|views| *views > 0) {
-						let views = if views >= 1_000_000 {
-							format!("{:.1}M views", views as f64 / 1_000_000.0)
-						} else if views >= 1_000 {
-							format!("{:.1}K views", views as f64 / 1_000.0)
-						} else {
-							format!("{views} views")
-						};
-						description = Some(match description {
-							Some(text) if !text.is_empty() => format!("{views}\n{text}"),
-							_ => views,
-						});
-					}
-					Some(Manga {
-						key: entry.series_slug,
-						title: entry.title,
-						cover: Some(cover),
-						description,
-						content_rating: ContentRating::Safe,
-						viewer: Viewer::Webtoon,
+		let mut popular = catalogue.clone();
+		sort_directory(&mut popular, 0);
+		let featured: Vec<Manga> = popular
+			.into_iter()
+			.take(12)
+			.map(browse_to_manga)
+			.collect();
+
+		let mut recent = catalogue.clone();
+		sort_directory(&mut recent, 1);
+		let updates: Vec<MangaWithChapter> = recent
+			.into_iter()
+			.filter_map(|series| {
+				let chapter = series.chapter.as_ref()?
+					.iter()
+					.max_by_key(|item| parse_iso(item.created_at.as_deref()))?
+					.clone();
+				let chapter_number = chapter_number_of(&chapter);
+				let date_uploaded = parse_iso(chapter.created_at.as_deref());
+				let locked = chapter.price.unwrap_or(0.0) > 0.0;
+				Some(MangaWithChapter {
+					manga: browse_to_manga(series),
+					chapter: Chapter {
+						key: chapter.chapter_slug,
+						chapter_number,
+						date_uploaded,
+						locked,
 						..Default::default()
-					})
-				})
-				.collect();
-			if !entries.is_empty() {
-				components.push(HomeComponent {
-					title: Some("Featured".into()),
-					subtitle: None,
-					value: HomeComponentValue::BigScroller {
-						entries,
-						auto_scroll_interval: Some(6.0),
 					},
-				});
-			}
+				})
+			})
+			.take(15)
+			.collect();
+
+		let mut newest = catalogue;
+		sort_directory(&mut newest, 2);
+		let new_links: Vec<Link> = newest
+			.into_iter()
+			.take(15)
+			.map(|series| {
+				link_of(
+					series.series_slug,
+					series.title,
+					image_url(series.thumbnail.as_deref()),
+				)
+			})
+			.collect();
+
+		let mut components = Vec::new();
+		if !featured.is_empty() {
+			components.push(HomeComponent {
+				title: Some("Most Viewed".into()),
+				subtitle: None,
+				value: HomeComponentValue::BigScroller {
+					entries: featured,
+					auto_scroll_interval: Some(8.0),
+				},
+			});
 		}
-
-		if let Some(Ok(response)) = trending_response
-			&& let Ok(trending) = response.get_json_owned::<TrendingResponse>()
-		{
-			for (title, entries) in [
-				("Trending Today", trending.day),
-				("Trending This Week", trending.week),
-				("Trending This Month", trending.month),
-			] {
-				let links: Vec<Link> = entries
-					.unwrap_or_default()
-					.into_iter()
-					.filter(|entry| !entry.series_slug.is_empty())
-					.map(|entry| {
-						link_of(
-							entry.series_slug,
-							entry.title,
-							image_url(entry.thumbnail.as_deref()),
-						)
-					})
-					.collect();
-				if links.is_empty() {
-					continue;
-				}
-				let ranked = title == "Trending This Month";
-				components.push(HomeComponent {
-					title: Some(title.into()),
-					subtitle: None,
-					value: if ranked {
-						HomeComponentValue::MangaList {
-							ranking: true,
-							page_size: Some(5),
-							entries: links,
-							listing: None,
-						}
-					} else {
-						HomeComponentValue::Scroller {
-							entries: links,
-							listing: None,
-						}
-					},
-				});
-			}
+		if !updates.is_empty() {
+			components.push(HomeComponent {
+				title: Some("Latest Updates".into()),
+				subtitle: None,
+				value: HomeComponentValue::MangaChapterList {
+					page_size: Some(5),
+					entries: updates,
+					listing: Some(Listing {
+						id: "updated".into(),
+						name: "Latest Updates".into(),
+						..Default::default()
+					}),
+				},
+			});
 		}
-
-		// The homepage stream carries the newest series and the update feed.
-		if let Some(Ok(response)) = home_response
-			&& let Ok(payload) = response.get_string()
-		{
-			let updates: Vec<BrowseSeries> =
-				extract_by_key(&payload, "series", |items: &Vec<BrowseSeries>| {
-					items.first().map(|f| f.chapter.is_some()).unwrap_or(false)
-				})
-				.unwrap_or_default();
-			let entries: Vec<MangaWithChapter> = updates
-				.into_iter()
-				.filter_map(|series| {
-					let chapter = series.chapter.clone()?.into_iter().next()?;
-					let number = chapter_number_of(&chapter);
-					let date_uploaded = parse_iso(chapter.created_at.as_deref());
-					Some(MangaWithChapter {
-						manga: browse_to_manga(series),
-						chapter: Chapter {
-							key: chapter.chapter_slug,
-							chapter_number: number,
-							date_uploaded,
-							..Default::default()
-						},
-					})
-				})
-				.collect();
-			if !entries.is_empty() {
-				components.push(HomeComponent {
-					title: Some("Latest Updates".into()),
-					subtitle: None,
-					value: HomeComponentValue::MangaChapterList {
-						page_size: Some(5),
-						entries,
-						listing: Some(Listing {
-							id: "updated".into(),
-							name: "Latest Updates".into(),
-							..Default::default()
-						}),
-					},
-				});
-			}
-
-			let new_series: Vec<BrowseSeries> =
-				extract_by_key(&payload, "data", |items: &Vec<BrowseSeries>| {
-					items
-						.first()
-						.map(|f| !f.series_slug.is_empty() && f.chapter.is_none())
-						.unwrap_or(false)
-				})
-				.unwrap_or_default();
-			let entries: Vec<Link> = new_series
-				.into_iter()
-				.map(|series| {
-					link_of(
-						series.series_slug,
-						series.title,
-						image_url(series.thumbnail.as_deref()),
-					)
-				})
-				.collect();
-			if !entries.is_empty() {
-				components.push(HomeComponent {
-					title: Some("New Series".into()),
-					subtitle: None,
-					value: HomeComponentValue::Scroller {
-						entries,
-						listing: Some(Listing {
-							id: "created".into(),
-							name: "Newest".into(),
-							..Default::default()
-						}),
-					},
-				});
-			}
+		if !new_links.is_empty() {
+			components.push(HomeComponent {
+				title: Some("Recently Added".into()),
+				subtitle: None,
+				value: HomeComponentValue::Scroller {
+					entries: new_links,
+					listing: Some(Listing {
+						id: "created".into(),
+						name: "Newest".into(),
+						..Default::default()
+					}),
+				},
+			});
 		}
-
 		Ok(HomeLayout { components })
 	}
 }
