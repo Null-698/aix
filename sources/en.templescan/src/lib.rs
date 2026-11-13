@@ -15,6 +15,7 @@ use core::cell::RefCell;
 mod rsc;
 mod network;
 mod rendered;
+mod catalogue;
 
 use rsc::*;
 
@@ -209,54 +210,58 @@ fn link_of(key: String, title: String, cover: Option<String>) -> Link {
 	}
 }
 
-/// The `/comics` route carries the whole catalogue in one array.
-fn directory(web: &RefCell<network::BrowserClient>) -> Result<Vec<BrowseSeries>> {
-	let payload = fetch_rsc(web, &format!("{DOMAIN}/comics"))?;
-	let items: Vec<BrowseSeries> = largest_array(&payload, |items: &[BrowseSeries]| {
-		items.first().map(|first| !first.series_slug.is_empty() && !first.title.is_empty())
-			.unwrap_or(false)
-	});
-	if !items.is_empty() {
-		return Ok(items);
+/// Query TempleToons' live catalogue controls instead of locally sorting the
+/// handful of cards that happen to be on its default "Latest Updates" page.
+fn directory(
+	web: &RefCell<network::BrowserClient>,
+	sort: i32,
+	status: &str,
+	query: &str,
+	required: usize,
+) -> Result<(Vec<BrowseSeries>, bool)> {
+	let order = match sort {
+		1 => "update_chapter",
+		2 => "created_at",
+		_ => "total_views",
+	};
+
+	// Search uses the site's own global search box, not the visible cards.
+	if !query.is_empty() {
+		return web.borrow_mut().browse_catalogue(query, "Ongoing", order, required);
 	}
-	// Newer TempleToons releases obfuscate the Flight JSON keys. Read the
-	// browser-rendered cards instead of depending on those rotating keys.
-	let doc = Html::parse_with_url(&payload, DOMAIN)?;
-	let mut entries = Vec::<BrowseSeries>::new();
-	if let Some(links) = doc.select("a[href*='/comic/']") {
-		for link in links {
-			let Some(title) = link.select_first("h2").and_then(|element| element.text()) else {
-				continue;
-			};
-			let Some(url) = link.attr("abs:href").or_else(|| link.attr("href")) else {
-				continue;
-			};
-			let Some(slug) = url.split("/comic/").nth(1).and_then(|value| value.split(['/', '?', '#']).next()) else {
-				continue;
-			};
-			if slug.is_empty() || entries.iter().any(|entry| entry.series_slug == slug) {
-				continue;
+
+	// The website's catalogue displays one status at a time. "All" must
+	// walk the individual status filters, as the official source does.
+	let statuses: &[&str] = match status {
+		"Ongoing" => &["Ongoing"],
+		"Hiatus" => &["Hiatus"],
+		"Completed" => &["Completed"],
+		"Canceled" => &["Canceled"],
+		"Dropped" => &["Dropped"],
+		_ => &["Ongoing", "Hiatus", "Completed", "Canceled", "Dropped"],
+	};
+	let mut collected = Vec::<BrowseSeries>::new();
+	let mut has_more = false;
+	for (index, selected) in statuses.iter().enumerate() {
+		let needed = required.saturating_sub(collected.len()).max(1);
+		let (items, status_has_more) = web.borrow_mut()
+			.browse_catalogue("", selected, order, needed)?;
+		for item in items {
+			if !collected.iter().any(|prev| prev.series_slug == item.series_slug) {
+				collected.push(item);
 			}
-			let thumbnail = link.parent()
-				.and_then(|parent| parent.select_first("img"))
-				.and_then(|image| image.attr("abs:src").or_else(|| image.attr("src")));
-			entries.push(BrowseSeries {
-				series_slug: slug.to_string(),
-				title,
-				thumbnail,
-				..Default::default()
-			});
+		}
+		has_more = status_has_more || index + 1 < statuses.len();
+		if collected.len() >= required {
+			break;
 		}
 	}
-	if entries.is_empty() {
-		bail!("Temple Scan: no series cards in browser HTML. Site layout may have changed.");
-	}
-	Ok(entries)
+	Ok((collected, has_more))
 }
 
-fn page_of(items: Vec<BrowseSeries>, page: i32) -> MangaPageResult {
+fn page_of(items: Vec<BrowseSeries>, page: i32, more: bool) -> MangaPageResult {
 	let start = (page.max(1) as usize - 1) * PAGE_SIZE;
-	let has_next_page = items.len() > start + PAGE_SIZE;
+	let has_next_page = more || items.len() > start + PAGE_SIZE;
 	MangaPageResult {
 		entries: items
 			.into_iter()
@@ -323,32 +328,9 @@ impl Source for TempleScan {
 			}
 		}
 
-		let mut items = directory(&self.browser)?;
-		items.retain(|series| {
-			if !query.is_empty() {
-				let title = series.title.to_lowercase();
-				let alternative = series
-					.alternative_names
-					.as_deref()
-					.unwrap_or("")
-					.to_lowercase();
-				if !title.contains(&query) && !alternative.contains(&query) {
-					return false;
-				}
-			}
-			if !status.is_empty()
-				&& !series
-					.status
-					.as_deref()
-					.unwrap_or("")
-					.eq_ignore_ascii_case(&status)
-			{
-				return false;
-			}
-			true
-		});
-		sort_directory(&mut items, sort);
-		Ok(page_of(items, page))
+		let required = page.max(1) as usize * PAGE_SIZE + 1;
+		let (items, more) = directory(&self.browser, sort, &status, &query, required)?;
+		Ok(page_of(items, page, more))
 	}
 
 	fn get_manga_update(
@@ -478,80 +460,33 @@ impl Source for TempleScan {
 
 impl Home for TempleScan {
 	fn get_home(&self) -> Result<HomeLayout> {
-		// The previous home ignored three failed requests and returned an empty
-		// layout. Rely on one browser-backed catalogue request instead; errors
-		// are surfaced to Aidoku rather than silently showing a blank page.
-		let catalogue = directory(&self.browser)?;
-		if catalogue.is_empty() {
-			bail!("Temple Scan: empty comics catalogue");
-		}
+		// Each home section queries the *actual* website sorting control.
+		// The previous source took all three from one default /comics page.
+		let (popular, _) = directory(&self.browser, 0, "Ongoing", "", 12)?;
+		let (latest, _) = directory(&self.browser, 1, "Ongoing", "", 16)?;
+		let (newest, _) = directory(&self.browser, 2, "Ongoing", "", 16)?;
 
-		let mut popular = catalogue.clone();
-		sort_directory(&mut popular, 0);
-		let featured: Vec<Manga> = popular
-			.into_iter()
-			.take(12)
-			.map(browse_to_manga)
-			.collect();
-
-		let mut recent = catalogue.clone();
-		sort_directory(&mut recent, 1);
-		let updates: Vec<MangaWithChapter> = recent
-			.into_iter()
-			.filter_map(|series| {
-				let chapter = series.chapter.as_ref()?
-					.iter()
-					.max_by_key(|item| parse_iso(item.created_at.as_deref()))?
-					.clone();
-				let chapter_number = chapter_number_of(&chapter);
-				let date_uploaded = parse_iso(chapter.created_at.as_deref());
-				let locked = chapter.price.unwrap_or(0.0) > 0.0;
-				Some(MangaWithChapter {
-					manga: browse_to_manga(series),
-					chapter: Chapter {
-						key: chapter.chapter_slug,
-						chapter_number,
-						date_uploaded,
-						locked,
-						..Default::default()
-					},
-				})
-			})
-			.take(15)
-			.collect();
-
-		let mut newest = catalogue;
-		sort_directory(&mut newest, 2);
-		let new_links: Vec<Link> = newest
-			.into_iter()
-			.take(15)
-			.map(|series| {
-				link_of(
-					series.series_slug,
-					series.title,
-					image_url(series.thumbnail.as_deref()),
-				)
-			})
-			.collect();
-
-		let mut components = Vec::new();
-		if !featured.is_empty() {
+		let mut components = Vec::<HomeComponent>::new();
+		if !popular.is_empty() {
 			components.push(HomeComponent {
 				title: Some("Most Viewed".into()),
 				subtitle: None,
 				value: HomeComponentValue::BigScroller {
-					entries: featured,
+					entries: popular.into_iter().map(browse_to_manga).collect(),
 					auto_scroll_interval: Some(8.0),
 				},
 			});
 		}
-		if !updates.is_empty() {
+		if !latest.is_empty() {
 			components.push(HomeComponent {
 				title: Some("Latest Updates".into()),
 				subtitle: None,
-				value: HomeComponentValue::MangaChapterList {
-					page_size: Some(5),
-					entries: updates,
+				value: HomeComponentValue::Scroller {
+					entries: latest.into_iter()
+						.map(|series| {
+							link_of(series.series_slug, series.title, image_url(series.thumbnail.as_deref()))
+						})
+						.collect(),
 					listing: Some(Listing {
 						id: "updated".into(),
 						name: "Latest Updates".into(),
@@ -560,12 +495,16 @@ impl Home for TempleScan {
 				},
 			});
 		}
-		if !new_links.is_empty() {
+		if !newest.is_empty() {
 			components.push(HomeComponent {
 				title: Some("Recently Added".into()),
 				subtitle: None,
 				value: HomeComponentValue::Scroller {
-					entries: new_links,
+					entries: newest.into_iter()
+						.map(|series| {
+							link_of(series.series_slug, series.title, image_url(series.thumbnail.as_deref()))
+						})
+						.collect(),
 					listing: Some(Listing {
 						id: "created".into(),
 						name: "Newest".into(),
@@ -573,6 +512,9 @@ impl Home for TempleScan {
 					}),
 				},
 			});
+		}
+		if components.is_empty() {
+			bail!("Temple Scan returned no comics for the home screen");
 		}
 		Ok(HomeLayout { components })
 	}
@@ -586,9 +528,9 @@ impl ListingProvider for TempleScan {
 			"created" => 2,
 			_ => bail!("Unknown listing"),
 		};
-		let mut items = directory(&self.browser)?;
-		sort_directory(&mut items, sort);
-		Ok(page_of(items, page))
+		let required = page.max(1) as usize * PAGE_SIZE + 1;
+		let (items, more) = directory(&self.browser, sort, "", "", required)?;
+		Ok(page_of(items, page, more))
 	}
 }
 
