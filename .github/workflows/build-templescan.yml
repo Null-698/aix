@@ -1,0 +1,58 @@
+name: Build Temple Scan AIX
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'sources/en.templescan/**'
+      - '.github/workflows/build-templescan.yml'
+      - '.github/actions/install-aidoku-cli/**'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust and WASM target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.99.0'
+          components: rustfmt
+          targets: wasm32-unknown-unknown
+      - name: Install Aidoku CLI
+        uses: ./.github/actions/install-aidoku-cli
+      - name: Format Rust
+        run: cargo fmt --manifest-path sources/en.templescan/Cargo.toml
+      - name: Package Temple Scan
+        working-directory: sources/en.templescan
+        run: aidoku package
+      - name: Verify package
+        run: |
+          set -euo pipefail
+          test -s sources/en.templescan/package.aix
+          aidoku verify sources/en.templescan/package.aix
+          unzip -t sources/en.templescan/package.aix
+          mkdir -p dist
+          cp sources/en.templescan/package.aix dist/en.templescan-v9.aix
+      - name: Upload AIX build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: en.templescan-v9
+          path: dist/en.templescan-v9.aix
+          if-no-files-found: error
+      - name: Publish AIX as GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="templescan-v9"
+          if gh release view "$tag" > /dev/null 2>&1; then
+            gh release upload "$tag" dist/en.templescan-v9.aix --clobber
+          else
+            gh release create "$tag" dist/en.templescan-v9.aix \
+              --target "$GITHUB_SHA" \
+              --title "Temple Scan v9 (Aidoku)" \
+              --notes "Fixed TempleToons browser requests and blank homepage. Modified from the PoppingMangoSources Temple Scan source."
+          fi
