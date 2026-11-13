@@ -51,9 +51,32 @@ fn parse_chapter_row(link: Element) -> Option<Chapter> {
 	if key.is_empty() {
 		return None;
 	}
-	let text = link.text().unwrap_or_default();
-	let number = chapter_number(&text)
+	// The whole anchor also contains a relative timestamp, e.g.
+	// <span>Chapter 27</span><span><time>16 days ago</time></span>.
+	// Parsing link.text() wrongly merges them into "Chapter 2716".
+	// The chapter title is the span beside the one containing <time>.
+	let chapter_name = link
+		.select_first("div:has(> span > time) > span:not(:has(time))")
+		.and_then(|element| element.text())
+		.or_else(|| {
+			// Alternative layouts still tend to render chapter names inside
+			// their own span/heading. Never fall back to the combined row text.
+			link.select("span:not(:has(time)), h3, h4, strong")
+				.and_then(|elements| {
+					elements
+						.filter_map(|element| element.text())
+						.find(|label| {
+							let lower = label.trim().to_ascii_lowercase();
+							lower.starts_with("chapter ")
+								|| lower.starts_with("chapter-")
+								|| lower.starts_with("episode ")
+								|| lower.starts_with("ep. ")
+						})
+				})
+		});
+	let number = chapter_name.as_deref().and_then(chapter_number)
 		.or_else(|| chapter_number(&key));
+	let text = link.text().unwrap_or_default();
 	let date_uploaded = link.select_first("time")
 		.and_then(|tag| tag.attr("datetime"))
 		.as_deref()
