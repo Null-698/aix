@@ -10,8 +10,10 @@ use aidoku::{
 	prelude::*,
 };
 use serde::Deserialize;
+use core::cell::RefCell;
 
 mod rsc;
+mod network;
 
 use rsc::*;
 
@@ -101,12 +103,8 @@ struct TrendingResponse {
 }
 
 /// Requests a route's flight stream rather than its rendered HTML.
-fn fetch_rsc(url: &str) -> Result<String> {
-	Request::get(url)?
-		.header("RSC", "1")
-		.header("Referer", &format!("{DOMAIN}/"))
-		.send()?
-		.get_string()
+fn fetch_rsc(web: &RefCell<network::BrowserClient>, url: &str) -> Result<String> {
+	web.borrow_mut().get_rsc(url)
 }
 
 fn image_url(path: Option<&str>) -> Option<String> {
@@ -211,8 +209,8 @@ fn link_of(key: String, title: String, cover: Option<String>) -> Link {
 }
 
 /// The `/comics` route carries the whole catalogue in one array.
-fn directory() -> Result<Vec<BrowseSeries>> {
-	let payload = fetch_rsc(&format!("{DOMAIN}/comics"))?;
+fn directory(web: &RefCell<network::BrowserClient>) -> Result<Vec<BrowseSeries>> {
+	let payload = fetch_rsc(web, &format!("{DOMAIN}/comics"))?;
 	let items: Vec<BrowseSeries> = largest_array(&payload, |items: &[BrowseSeries]| {
 		items
 			.first()
@@ -266,11 +264,13 @@ fn sort_directory(items: &mut [BrowseSeries], sort: i32) {
 	}
 }
 
-struct TempleScan;
+struct TempleScan {
+	browser: RefCell<network::BrowserClient>,
+}
 
 impl Source for TempleScan {
 	fn new() -> Self {
-		Self
+		Self { browser: RefCell::new(network::BrowserClient::new()) }
 	}
 
 	fn get_search_manga_list(
@@ -292,7 +292,7 @@ impl Source for TempleScan {
 			}
 		}
 
-		let mut items = directory()?;
+		let mut items = directory(&self.browser)?;
 		items.retain(|series| {
 			if !query.is_empty() {
 				let title = series.title.to_lowercase();
@@ -327,7 +327,7 @@ impl Source for TempleScan {
 		needs_chapters: bool,
 	) -> Result<Manga> {
 		let slug = manga.key.clone();
-		let payload = fetch_rsc(&format!("{DOMAIN}/comic/{slug}"))?;
+		let payload = fetch_rsc(&self.browser, &format!("{DOMAIN}/comic/{slug}"))?;
 		let Some(mut data) = extract_by_key::<SeriesData, _>(&payload, "seriesData", |value| {
 			!value.title.is_empty()
 		}) else {
@@ -430,7 +430,7 @@ impl Source for TempleScan {
 	}
 
 	fn get_page_list(&self, manga: Manga, chapter: Chapter) -> Result<Vec<Page>> {
-		let payload = fetch_rsc(&format!("{DOMAIN}/comic/{}/{}", manga.key, chapter.key))?;
+		let payload = fetch_rsc(&self.browser, &format!("{DOMAIN}/comic/{}/{}", manga.key, chapter.key))?;
 		let pages = extract_by_key::<Vec<String>, _>(&payload, "pages", |value| {
 			value.iter().all(|page| !page.is_empty())
 		})
@@ -640,7 +640,7 @@ impl ListingProvider for TempleScan {
 			"created" => 2,
 			_ => bail!("Unknown listing"),
 		};
-		let mut items = directory()?;
+		let mut items = directory(&self.browser)?;
 		sort_directory(&mut items, sort);
 		Ok(page_of(items, page))
 	}
