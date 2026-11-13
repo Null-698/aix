@@ -25,7 +25,7 @@ fn is_verification_page(url: &str, body: &str) -> bool {
 }
 
 pub struct BrowserClient {
-	web_view: WebView,
+	pub(crate) web_view: WebView,
 }
 
 impl BrowserClient {
