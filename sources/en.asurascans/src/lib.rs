@@ -20,16 +20,19 @@ mod models;
 mod site;
 
 use models::*;
+use core::cell::RefCell;
 
 const BASE_URL: &str = "https://asurascans.com";
 const API_URL: &str = "https://api.asurascans.com/api";
 
-struct AsuraScans;
+struct AsuraScans {
+	web: RefCell<site::HtmlClient>,
+}
 
 impl Source for AsuraScans {
 	fn new() -> Self {
 		set_rate_limit(2, 2, TimeUnit::Seconds);
-		Self
+		Self { web: RefCell::new(site::HtmlClient::new()) }
 	}
 
 	fn get_search_manga_list(
@@ -117,7 +120,7 @@ impl Source for AsuraScans {
 			.filter(|url| url.starts_with(BASE_URL))
 			.map(Into::into)
 			.unwrap_or_else(|| helpers::get_manga_url(&manga.key));
-		let (html, resolved_url) = site::get_html(&url)?;
+		let (html, resolved_url) = self.web.borrow_mut().get_html(&url)?;
 
 		if needs_details {
 			manga.title = html
@@ -320,7 +323,7 @@ impl Source for AsuraScans {
 			.unwrap_or_else(|| helpers::get_chapter_url(&chapter.key, &manga.key));
 
 		// The site serves page URLs in the browser-rendered chapter HTML.
-		let (html, _) = site::get_html(&chapter_url)?;
+		let (html, _) = self.web.borrow_mut().get_html_for_reading(&chapter_url)?;
 		let pages: Vec<Page> = html
 			.select("img[alt^='Page '], img[src*='/asura-images/chapters/'], img[data-src*='/asura-images/chapters/']")
 			.map(|images| {
