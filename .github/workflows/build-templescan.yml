@@ -35,24 +35,24 @@ jobs:
           aidoku verify sources/en.templescan/package.aix
           unzip -t sources/en.templescan/package.aix
           mkdir -p dist
-          cp sources/en.templescan/package.aix dist/en.templescan-v9.aix
+          cp sources/en.templescan/package.aix dist/en.templescan-v10.aix
       - name: Upload AIX build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: en.templescan-v9
-          path: dist/en.templescan-v9.aix
+          name: en.templescan-v10
+          path: dist/en.templescan-v10.aix
           if-no-files-found: error
       - name: Publish AIX as GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag="templescan-v9"
+          tag="templescan-v10"
           if gh release view "$tag" > /dev/null 2>&1; then
-            gh release upload "$tag" dist/en.templescan-v9.aix --clobber
+            gh release upload "$tag" dist/en.templescan-v10.aix --clobber
           else
-            gh release create "$tag" dist/en.templescan-v9.aix \
+            gh release create "$tag" dist/en.templescan-v10.aix \
               --target "$GITHUB_SHA" \
-              --title "Temple Scan v9 (Aidoku)" \
+              --title "Temple Scan v10 (Aidoku)" \
               --notes "Fixed TempleToons browser requests and blank homepage. Modified from the PoppingMangoSources Temple Scan source."
           fi
